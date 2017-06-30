@@ -19,7 +19,8 @@ foreach (current ${TEST_FOLDERS})
     file(GLOB TEST_LIST RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/${current}/" "${CMAKE_CURRENT_SOURCE_DIR}/${current}/*")
     foreach (test ${TEST_LIST})
         # find the extension and choose the right type of test
-        get_filename_component(extension "${CMAKE_CURRENT_SOURCE_DIR}/${current}/${test}" EXT)
+        get_filename_component(extension_dot "${CMAKE_CURRENT_SOURCE_DIR}/${current}/${test}" EXT)
+        string(SUBSTRING ${extension_dot} 1 -1 extension) # strip the dot from the extension
         get_filename_component(testname "${CMAKE_CURRENT_SOURCE_DIR}/${current}/${test}" NAME_WE)
         get_filename_component(testpath "${CMAKE_CURRENT_SOURCE_DIR}/${current}/${test}" ABSOLUTE)
         get_filename_component(testdirectory "${CMAKE_CURRENT_SOURCE_DIR}/${current}/${test}" DIRECTORY)

@@ -67,11 +67,11 @@ int main(int argc, const char* argv[])
 
     // Figure out the result we expect
     int expected;
-    if (stricmp(argv[ARG_TYPE], "green"))
+    if (stricmp(argv[ARG_TYPE], "green") == 0)
     {
         expected = 0;
     }
-    else if (stricmp(argv[ARG_TYPE], "red"))
+    else if (stricmp(argv[ARG_TYPE], "red") == 0)
     {
         expected = 1;
     }
