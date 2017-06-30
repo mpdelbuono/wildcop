@@ -14,7 +14,6 @@ const int wildcop::DiscardedReturnValueChecker::dummy = AutoInitializeChecker<Di
 
 void wildcop::DiscardedReturnValueChecker::Initialize(clang::ento::CheckerRegistry& registry)
 {
-    std::cout << "Registration successful" << std::endl;
     registry.addChecker<DiscardedReturnValueChecker>("wildcop.0-1-7", "MISRA C++ 0-1-7: Discarded Return Value");
 }
 
