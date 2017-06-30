@@ -49,6 +49,8 @@
 #  LLVM_VERSION_MAJOR  - Major version of LLVM.
 #  LLVM_VERSION_MINOR  - Minor version of LLVM.
 #  LLVM_VERSION_STRING - Full LLVM version string (e.g. 2.9).
+#  CLANG_BIN           - Absolute path to clang binary
+#  CLANGXX_BIN         - Absolute path to clang++ binary
 #
 # Note: The variable names were chosen in conformance with the offical CMake
 # guidelines, see ${CMAKE_ROOT}/Modules/readme.txt.
@@ -276,6 +278,20 @@ string(REGEX REPLACE "[0-9]+\\.([0-9]+).*[A-Za-z]*" "\\1" LLVM_VERSION_MINOR "${
 if (${LLVM_VERSION_STRING} VERSION_LESS ${LLVM_FIND_VERSION})
     message(FATAL_ERROR "Unsupported LLVM version found ${LLVM_VERSION_STRING}. At least version ${LLVM_FIND_VERSION} is required.")
 endif()
+
+# Try to find clang 
+get_filename_component(CLANG_BIN_DIR "${LLVM_CONFIG}" DIRECTORY)
+find_file(CLANG_BIN 
+    NAMES "clang" "clang.exe" "clang.bin" "clang.out"
+    PATHS "${CLANG_BIN_DIR}"
+    DOC "Path to clang binary"
+    NO_DEFAULT_PATH)
+find_file(CLANGXX_BIN 
+    NAMES "clang++" "clang++.exe" "clang++.bin" "clang++.out"
+    PATHS "${CLANG_BIN_DIR}"
+    DOC "Path to clang++ binary"
+    NO_DEFAULT_PATH)
+
 
 # Use the default CMake facilities for handling QUIET/REQUIRED.
 include(FindPackageHandleStandardArgs)
