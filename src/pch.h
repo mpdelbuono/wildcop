@@ -12,7 +12,7 @@
     #pragma warning(disable:4141)
     #pragma warning(disable:4291)
     #pragma warning(disable:4996)
-    #pragma warning(disable:C4267)
+    #pragma warning(disable:4267)
     #define WILDCOP_WARNING_POP() __pragma(warning(pop))
 #else
     #define WILDCOP_WARNING_POP()

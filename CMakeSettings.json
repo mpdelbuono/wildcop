@@ -53,7 +53,7 @@
       "buildRoot": "${env.LOCALAPPDATA}\\CMakeBuild\\${workspaceHash}\\build\\${name}",
       "cmakeCommandArgs": "",
       "buildCommandArgs": "-m -v:minimal",
-      "ctestCommandArgs": "",
+      "ctestCommandArgs": "-V",
       "variables": [
         {
           "name": "LLVM_ROOT_DIR",

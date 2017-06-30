@@ -46,7 +46,6 @@ enum Arguments
  */
 int main(int argc, const char* argv[])
 {
-    std::cout << "----" << std::endl;
     // Verify all arguments are present
     if (argc != ARG_NUMBER_OF_ARGUMENTS)
     {
@@ -58,11 +57,12 @@ int main(int argc, const char* argv[])
     // Build the clang command
     std::stringstream commandBuilder;
     commandBuilder << argv[ARG_CLANGPATH] << " "    // Not using quotes here because of a problem with system() on Windows. At some point
-        << "--analyze "                             // later we need to figure out how to handle this gracefully: https://stackoverflow.com/questions/9964865/
-        << "-fplugin=\"" << argv[ARG_PLUGINPATH] << "\" "
+        << "-cc1 "                                  // later we need to figure out how to handle this gracefully: https://stackoverflow.com/questions/9964865/
+        << "-load \"" << argv[ARG_PLUGINPATH] << "\" "
         << "-x c++ -std=c++14 "
-        << "\"" << argv[ARG_TESTPATH] << "\" "
-        << "-Xanalyzer -analyzer-checker=" << argv[ARG_RULENAME];
+        << "-analyze "
+        << "-analyzer-checker=" << argv[ARG_RULENAME] << " " 
+        << "\"" << argv[ARG_TESTPATH] << "\" ";
     std::string command = commandBuilder.str();
 
     // Figure out the result we expect
