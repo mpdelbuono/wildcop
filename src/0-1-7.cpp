@@ -52,6 +52,25 @@ wildcop::DiscardedReturnValueChecker::DiscardedReturnValueChecker()
     bugType.reset(new ento::BugType(this, "0-1-7 Non-compliance: Return Value Discarded", "MISRA C++"));
 }
 
+void wildcop::DiscardedReturnValueChecker::checkPreCall(const clang::ento::CallEvent &call, clang::ento::CheckerContext &C) const
+{
+    // We're only here to see if a tracked value is being consumed.
+    // Analysis of the call's output will be handled by checkPostCall().
+
+    for (unsigned int i = 0; i < call.getNumArgs(); ++i)
+    {
+        ento::SymbolRef argSymbol = call.getArgSVal(i).getAsSymbol();
+
+        // Check if we're tracking this symbol
+        if (C.getState()->contains<ReturnValueMap>(argSymbol))
+        {
+            // This symbol has now been used
+            auto newState = C.getState()->set<ReturnValueMap>(argSymbol, ReturnValueState::GetUsed());
+            C.addTransition(newState);
+        }
+    }
+}
+
 void wildcop::DiscardedReturnValueChecker::checkPostCall(const clang::ento::CallEvent &call, clang::ento::CheckerContext &C) const
 {
     // If this is a call to a void function, we don't care.

@@ -9,6 +9,7 @@
 namespace wildcop
 {
     class DiscardedReturnValueChecker : public clang::ento::Checker<
+                                                  clang::ento::check::PreCall,
                                                   clang::ento::check::PostCall,
                                                   clang::ento::check::Location,
                                                   clang::ento::check::Bind,
@@ -21,6 +22,11 @@ namespace wildcop
          * Constructs a new DiscardedReturnValueChecker
          */
         DiscardedReturnValueChecker();
+
+        /**
+         * Called when a function call is about to be processed by the analyzer
+         */
+        void checkPreCall(const clang::ento::CallEvent &call, clang::ento::CheckerContext &C) const;
 
         /**
          * Called when a function call occurs and has been processed by the analyzer
