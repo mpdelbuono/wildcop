@@ -9,6 +9,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <fstream>
 
 enum ExitCodes
 {
@@ -24,11 +25,14 @@ enum Arguments
     ARG_RULENAME,
     ARG_CLANGPATH,
     ARG_PLUGINPATH,
+    ARG_TEMPFILE,
     ARG_TESTPATH,
 
     // Always last:
     ARG_NUMBER_OF_ARGUMENTS
 };
+
+int countDiagnostics(const char* filename);
 
 /**
  * Entry point of the application. Arguments are as follows:
@@ -50,7 +54,7 @@ int main(int argc, const char* argv[])
     if (argc != ARG_NUMBER_OF_ARGUMENTS)
     {
         std::cerr << "Incorrect number of arguments" << std::endl;
-        std::cerr << "Usage: " << argv[ARG_SELF] << " <type> <checker> <clang> <plugin> <file>" << std::endl;
+        std::cerr << "Usage: " << argv[ARG_SELF] << " <type> <checker> <clang> <plugin> <temp file> <file>" << std::endl;
         return EXIT_CODE_ERROR;
     }
 
@@ -61,8 +65,10 @@ int main(int argc, const char* argv[])
         << "-load \"" << argv[ARG_PLUGINPATH] << "\" "
         << "-x c++ -std=c++14 "
         << "-analyze "
-        << "-analyzer-checker=" << argv[ARG_RULENAME] << " " 
-        << "\"" << argv[ARG_TESTPATH] << "\" ";
+        << "-analyzer-checker=" << argv[ARG_RULENAME] << " "
+        << "-analyzer-display-progress "
+        << "\"" << argv[ARG_TESTPATH] << "\" "
+        << "2> " << argv[ARG_TEMPFILE];
     std::string command = commandBuilder.str();
 
     // Figure out the result we expect
@@ -83,7 +89,6 @@ int main(int argc, const char* argv[])
     }
 
     // Execute it
-    std::cout << command.c_str() << std::endl;
     int result = system(command.c_str());
     if (result == -1)
     {
@@ -91,14 +96,42 @@ int main(int argc, const char* argv[])
         std::cerr << "system() call failed" << std::endl;
         return EXIT_CODE_ERROR;
     }
-    else if (result == expected)
+    else if (result == 0 && countDiagnostics(argv[ARG_TEMPFILE]) == expected)
     {
         // Test passed
         return EXIT_CODE_SUCCESS;
     }
-    else
+    else if (result == 0)
     {
         // Test failed
         return EXIT_CODE_FAILURE;
     }
+    else
+    {
+        // Some other error occurred
+        std::cerr << "clang++ exited with code " << result << std::endl;
+        return EXIT_CODE_ERROR;
+    }
+}
+
+/**
+ * Counts the number of diagnostics present in the specified file 
+ */
+int countDiagnostics(const char* filename)
+{
+    // Open the file
+    std::ifstream stream(filename, std::ios_base::in);
+
+    // Scan through line by line looking for 'warning:"
+    int count = 0;
+    while (stream.eof() == false && stream.fail() == false && stream.bad() == false)
+    {
+        std::string line;
+        std::getline(stream, line);
+        if (line.find("warning:") != std::string::npos)    // search for "warning:"
+        {
+            ++count;
+        }
+    };
+    return count;
 }

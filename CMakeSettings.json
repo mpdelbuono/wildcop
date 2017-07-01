@@ -42,7 +42,7 @@
       "variables": [
         {
           "name": "LLVM_ROOT_DIR",
-          "value": "X:/llvm-install/"
+          "value": "X:/llvm-debug/"
         }
       ]
     },

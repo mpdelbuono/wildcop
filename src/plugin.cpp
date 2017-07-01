@@ -28,7 +28,6 @@ namespace wildcop
     }
 }
 
-#include <intrin.h>
 // Register with clang
 CLANG_API
 void clang_registerCheckers(CheckerRegistry &registry) {

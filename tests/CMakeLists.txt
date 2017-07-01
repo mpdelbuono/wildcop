@@ -26,10 +26,19 @@ foreach (current ${TEST_FOLDERS})
         get_filename_component(testdirectory "${CMAKE_CURRENT_SOURCE_DIR}/${current}/${test}" DIRECTORY)
         get_filename_component(clang "${CLANGXX_BIN}" ABSOLUTE)
 
+        # find a temporary directory 
+        if (WIN32)
+            set(temppath "$ENV{TEMP}")
+        else()
+            set(temppath "/tmp/")
+        endif()
+        get_filename_component(tempfile "${temppath}/wildcop-test-output.txt" ABSOLUTE)
+        file(WRITE ${tempfile} "") # clear the file 
+
         # add this test
         add_test(
             NAME "${current}-${testname}"
-            COMMAND wildcop-test-runner ${extension} "wildcop.${current}" ${clang} $<TARGET_FILE:wildcop> ${testpath}
+            COMMAND wildcop-test-runner ${extension} "wildcop.${current}" ${clang} $<TARGET_FILE:wildcop> ${tempfile} ${testpath}
             WORKING_DIRECTORY "${testdirectory}"
 		)
     endforeach()
