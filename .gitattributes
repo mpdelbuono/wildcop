@@ -3,6 +3,10 @@
 ###############################################################################
 * text=auto
 
+# .red and .green files are actually tests, which will be C++ code
+*.red linguist-language=C++
+*.green linguist-language=c++
+
 ###############################################################################
 # Set default behavior for command prompt diff.
 #
