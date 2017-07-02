@@ -52,6 +52,22 @@ wildcop::DiscardedReturnValueChecker::DiscardedReturnValueChecker()
     bugType.reset(new ento::BugType(this, "0-1-7 Non-compliance: Return Value Discarded", "MISRA C++"));
 }
 
+void wildcop::DiscardedReturnValueChecker::checkPreCall(const clang::ento::CallEvent &call, clang::ento::CheckerContext &C) const
+{
+    // We're only here to see if a tracked value is being consumed.
+    // Analysis of the call's output will be handled by checkPostCall().
+    for (unsigned int i = 0; i < call.getNumArgs(); ++i)
+    {
+        ento::SymbolRef argSymbol = call.getArgSVal(i).getAsSymbol();
+        if (argSymbol == nullptr)
+        {
+            return;
+        }
+
+        markSymbolUsed(argSymbol, C);
+    }
+}
+
 void wildcop::DiscardedReturnValueChecker::checkPostCall(const clang::ento::CallEvent &call, clang::ento::CheckerContext &C) const
 {
     // If this is a call to a void function, we don't care.
@@ -90,12 +106,7 @@ void wildcop::DiscardedReturnValueChecker::checkLocation(
         }
 
         // Are we tracking this symbol?
-        if (C.getState()->contains<ReturnValueMap>(symbol))
-        {
-            // This is an SVal we are tracking. Record it has been loaded.
-            auto nextState = C.getState()->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
-            C.addTransition(nextState);
-        }
+        markSymbolUsed(symbol, C, statement->getSourceRange());
     }
 }
 
@@ -112,20 +123,8 @@ void wildcop::DiscardedReturnValueChecker::checkBind(
         return;
     }
 
-    // Are we tracking this symbol?
-    if (C.getState()->contains<ReturnValueMap>(symbol))
-    {
-        // This is an SVal we are tracking. This symbol has now been loaded, but the new one is unused.
-        // Begin tracking the new one if we can.
-        auto nextState = C.getState()->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
-        C.addTransition(nextState);
-        ento::SymbolRef newSymbol = location.getAsSymbol();
-        if (newSymbol != nullptr)
-        {
-            nextState = C.getState()->set<ReturnValueMap>(newSymbol, ReturnValueState::GetUnused(statement->getSourceRange()));
-            C.addTransition(nextState);
-        }
-    }
+    // Mark the symbol loaded. Forward if necessary.
+    markSymbolUsed(symbol, C, statement->getSourceRange(), location.getAsSymbol());
 }
 
 void wildcop::DiscardedReturnValueChecker::checkDeadSymbols(clang::ento::SymbolReaper &SR, clang::ento::CheckerContext &C) const
@@ -166,4 +165,35 @@ void wildcop::DiscardedReturnValueChecker::emitBug(clang::ento::CheckerContext &
     report->addRange(C.getState()->get<ReturnValueMap>(symbol)->GetSourceRange());
     report->markInteresting(symbol);
     C.emitReport(std::move(report));
+}
+
+void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
+    ento::SymbolRef symbol, 
+    ento::CheckerContext &C, 
+    clang::SourceRange sourceRange,
+    ento::SymbolRef forwardedSymbol) const
+{
+    // Check if we're tracking this symbol
+    if (C.getState()->contains<ReturnValueMap>(symbol))
+    {
+        // This symbol has now been used
+        auto newState = C.getState()->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
+        C.addTransition(newState);
+    }
+
+    // Check dependent symbols
+    for (auto dependencyIterator = symbol->symbol_begin(); dependencyIterator != symbol->symbol_end(); ++dependencyIterator)
+    {
+        // Don't need to check ourselves - we already did that
+        // (This can occur on basic symbols as well as expressions)
+        if (symbol != *dependencyIterator)
+        {
+            markSymbolUsed(*dependencyIterator, C);
+            if (forwardedSymbol != nullptr)
+            {
+                auto nextState = C.getState()->set<ReturnValueMap>(forwardedSymbol, ReturnValueState::GetUnused(sourceRange));
+                C.addTransition(nextState);
+            }
+        }
+    }
 }

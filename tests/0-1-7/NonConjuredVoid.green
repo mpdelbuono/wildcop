@@ -1,0 +1,8 @@
+void foo() // this function will be inlined by the SA
+{
+}
+
+void bar()
+{
+   foo(); // not an interesting case, but forms equivalence with DiscardNonConjured.red
+}
