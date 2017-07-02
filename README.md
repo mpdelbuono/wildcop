@@ -1,9 +1,10 @@
 # Wildcop Clang Plugin
-The Wildcop project is a plugin that adds MISRA C++ compliance checking to the static analyzer.
-There are a wide number of commercial products that provide this MISRA C++ compliance check, but
-they are incredibly expensive. With the number of safety-critical projects on the rise, it is the
-goal of the Wildcop project to provide an open source compliance check to increase the accessibility
-of safe code and improve the safety-critical ecosystem as a whole.
+The Wildcop project is a plugin that adds [MISRA C++](https://www.misra.org.uk/?TabId=171) compliance 
+checking to the [clang static analyzer](https://clang-analyzer.llvm.org/). There are a wide number of 
+commercial products that provide this MISRA C++ compliance check, but they are incredibly expensive. 
+With the number of safety-critical projects on the rise, it is the goal of the Wildcop project to provide 
+an open source compliance check to increase the accessibility of safe code and improve the safety-critical 
+ecosystem as a whole.
 
 ## What is MISRA C++?
 The MISRA C++ rules (formally "MISRA-C++:2008 Guidelines for the use of C++ language in critical systems")
