@@ -252,7 +252,7 @@ bool wildcop::DiscardedReturnValueChecker::statementContainsExpr(const clang::St
     }
 }
 
-void wildcop::DiscardedReturnValueChecker::emitBug(clang::ento::CheckerContext &C, clang::SourceRange sourceRange/*, const clang::Decl* declWithIssue*/) const
+void wildcop::DiscardedReturnValueChecker::emitBug(clang::ento::CheckerContext &C, clang::SourceRange sourceRange) const
 {
     std::unique_ptr<ento::BugReport> report;
 
@@ -334,9 +334,9 @@ void wildcop::DiscardedReturnValueChecker::markValueUsed(
                 newState = newState->remove<PendingMemoryRegionSet>(pendingMemoryRegion);
 
                 // If we have a forwarding expression, start tracking that
-                if (forwardedValue.hasValue() && forwardedValue->getAsRegion() != nullptr)
+                if (forwardedValue.hasValue())
                 {
-                    newState = newState->add<PendingMemoryRegionSet>(TrackedValueType<ento::MemRegion>(forwardedValue->getAsRegion()));
+                    newState = forwardValueUsage(*forwardedValue, forwardingExpression, newState, C);
                 }
             }
         }
@@ -411,7 +411,7 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
         state = state->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
         if (forwardedValue.hasValue())
         {
-            state = forwardValueUsage(*forwardedValue, forwardingExpression, state);
+            state = forwardValueUsage(*forwardedValue, forwardingExpression, state, C);
         }
     }
 
@@ -425,7 +425,7 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
             markSymbolUsed(*dependencyIterator, C);
             if (forwardedValue.hasValue())
             {
-                state = forwardValueUsage(*forwardedValue, forwardingExpression, state);
+                state = forwardValueUsage(*forwardedValue, forwardingExpression, state, C);
             }
         }
     }
@@ -437,7 +437,11 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
     }
 }
 
-ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::forwardValueUsage(clang::ento::SVal forwardingValue, const Expr* valueExpression, clang::ento::ProgramStateRef state) const
+ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::forwardValueUsage(
+    clang::ento::SVal forwardingValue, 
+    const Expr* valueExpression, 
+    clang::ento::ProgramStateRef state,
+    clang::ento::CheckerContext& C) const
 {
     // There are two types of values we can forward: symbols and memory regions
     ento::SymbolRef symbol = forwardingValue.getAsSymbol();
@@ -452,6 +456,25 @@ ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::forwardValueUsage(cl
         if (memRegion)
         {
             // This is a memory region. Start tracking it.
+            TrackedValueType<ento::MemRegion> regionState(memRegion);
+            if (state->contains<PendingMemoryRegionSet>(regionState))
+            {
+                // This memory region is already tracked! That means we're overwriting it while unused.
+                // Find a reference to the old state
+                for (TrackedValueType<ento::MemRegion> oldRegion : state->get<PendingMemoryRegionSet>())
+                {
+                    if (oldRegion == regionState)
+                    {
+                        // Emit a bug for this.
+                        ento::ExplodedNode* errorNode = C.generateNonFatalErrorNode(state, &tag);
+                        auto report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", errorNode);
+                        report->addRange(valueExpression->getSourceRange());
+                        report->addNote("return value originated here", ento::PathDiagnosticLocation(oldRegion.GetSourceRange().getBegin(), C.getSourceManager()));
+                        C.emitReport(std::move(report));
+                        break;
+                    }
+                }
+            }
             return state->add<PendingMemoryRegionSet>(TrackedValueType<ento::MemRegion>(memRegion));
         }
         else

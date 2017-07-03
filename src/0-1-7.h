@@ -102,8 +102,31 @@ namespace wildcop
             const clang::Expr* expression, 
             llvm::Optional<clang::ento::SVal> forwardedValue = llvm::Optional<clang::ento::SVal>()) const;
 
-        clang::ento::ProgramStateRef forwardValueUsage(clang::ento::SVal forwardingValue, const clang::Expr* valueExpression, clang::ento::ProgramStateRef state) const;
+        /**
+         * Forwards the usage of a value into another value. This is used for expressions such as assignments where merely
+         * storing the value is insufficient to consider the value "used", but may alter the location of the value that must
+         * now be tracked. If the specified value is a MemRegion that is already being tracked as unused, then the original
+         * MemRegion is reported as a bug, as the overwritten value was never used.
+         * @param forwardingValue the new value to track
+         * @param valueExpression the expression from which the value is derived, for use in bug reports
+         * @param state the current state of the analysis
+         * @param C the checker context with which to emit a bug if necessary
+         */
+        clang::ento::ProgramStateRef forwardValueUsage(
+            clang::ento::SVal forwardingValue, 
+            const clang::Expr* valueExpression, 
+            clang::ento::ProgramStateRef state,
+            clang::ento::CheckerContext& C) const;
 
+        /**
+         * Convenience template for determining if a tracked set is empty. If it is not empty, a bug is reported for every
+         * element in the set
+         * @tparam T the set type
+         * @param state the current state of the analysis
+         * @param C the checker context with which to emit the bug
+         * @returns the new state of the set. This has only been altered if the set was not empty, in which case it has 
+         * been emptied to eliminate duplicates and clean up.
+         */
         template <class T>
         clang::ento::ProgramStateRef checkSetIsEmpty(clang::ento::ProgramStateRef state, clang::ento::CheckerContext& C) const;
 
