@@ -52,12 +52,13 @@ REGISTER_MAP_WITH_PROGRAMSTATE(ReturnValueMap, clang::ento::SymbolRef, ReturnVal
 // We use this program trait to store that data: the most recently received set of non-loc symbols, all of which
 // must be consumed prior to the next statement. Evaluation of a subsequent statement without first clearing this
 // list is a bug report.
-struct PendingNonLocValue
+template <class T>
+struct TrackedValueType
 {
 public:
-    PendingNonLocValue(const clang::Expr* originExpr) : expr(originExpr) {};
-    bool operator ==(PendingNonLocValue const &rhs) const { return expr == rhs.expr; }
-    bool operator <(PendingNonLocValue const& rhs) const {
+    TrackedValueType(const T* origin) : origin(origin) {};
+    bool operator ==(TrackedValueType<T> const &rhs) const { return origin == rhs.origin; }
+    bool operator <(TrackedValueType<T> const& rhs) const {
         llvm::FoldingSetNodeID lhsProfile, rhsProfile;
         Profile(lhsProfile);
         rhs.Profile(rhsProfile);
@@ -66,15 +67,14 @@ public:
 
     void Profile(llvm::FoldingSetNodeID &ID) const
     {
-        ID.AddPointer(expr);
+        ID.AddPointer(origin);
     }
 
-    const clang::Expr* GetOriginExpr() const { return expr; }
+    const T* GetOrigin() const { return origin; }
 private:
-    const clang::Expr* expr;
+    const T* origin;
 };
-REGISTER_SET_WITH_PROGRAMSTATE(PendingNonLocValueSet, PendingNonLocValue);
-
+REGISTER_SET_WITH_PROGRAMSTATE(PendingNonLocValueSet, TrackedValueType<clang::Expr>);
 
 wildcop::DiscardedReturnValueChecker::DiscardedReturnValueChecker()
     :tag(this, "wildcop-mcpp-0-1-7")
@@ -127,8 +127,21 @@ void wildcop::DiscardedReturnValueChecker::checkBind(
     const clang::Stmt *statement,
     clang::ento::CheckerContext &C) const
 {
-    // Mark the symbol being loaded. Forward if necessary.
-    markValueUsed(value, llvm::dyn_cast<const clang::Expr>(statement), C, statement->getSourceRange(), location.getAsSymbol());
+    // If this is not an expression, then it is a complex statement whose expressions we need to dive into
+    const clang::Expr* expr = llvm::dyn_cast<const clang::Expr>(statement);
+    if (expr == nullptr)
+    {
+        for (auto child : statement->children())
+        {
+            // Recursively check the inner statement
+            checkBind(location, value, child, C);
+        }
+    }
+    else
+    {
+        // Mark the symbol being loaded. Forward if necessary.
+        markValueUsed(value, expr, C, statement->getSourceRange(), location.getAsSymbol());
+    }
 }
 
 void wildcop::DiscardedReturnValueChecker::checkEndFunction(clang::ento::CheckerContext &C) const
@@ -144,7 +157,7 @@ void wildcop::DiscardedReturnValueChecker::checkEndFunction(clang::ento::Checker
             // Emit bugs for all pending non-locs
             for (auto nonLoc : set)
             {
-                emitBug(C, nonLoc.GetOriginExpr()->getSourceRange());
+                emitBug(C, nonLoc.GetOrigin()->getSourceRange());
 
                 // Clear it from the set so we don't keep tracking this/emit duplicates
                 auto newState = C.getState()->remove<PendingNonLocValueSet>(nonLoc);
@@ -241,7 +254,7 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUnused(
         // This is not symbolic; probably because it's a non-loc. 
         // Record the expression as unused
         auto oldState = C.getState();
-        auto newState = oldState->add<PendingNonLocValueSet>(PendingNonLocValue(originExpr));
+        auto newState = oldState->add<PendingNonLocValueSet>(TrackedValueType<clang::Expr>(originExpr));
         C.addTransition(newState, &tag);
     }
     else
@@ -278,7 +291,7 @@ void wildcop::DiscardedReturnValueChecker::markValueUsed(
 clang::ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::removeUsedExpressionsFromState(clang::ento::ProgramStateRef state, const clang::Expr* expression) const
 {
     // This is not a symbol. If we're tracking it as a non-loc, remove it.
-    PendingNonLocValue nonLoc(expression);
+    TrackedValueType<clang::Expr> nonLoc(expression);
     if (state->contains<PendingNonLocValueSet>(nonLoc))
     {
         auto newState = state->remove<PendingNonLocValueSet>(nonLoc);
