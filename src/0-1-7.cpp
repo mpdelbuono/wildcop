@@ -71,10 +71,27 @@ public:
     }
 
     const T* GetOrigin() const { return origin; }
+    const SourceRange GetSourceRange() const { return (origin->*LookupSourceRangeFunction<T>())(); }
 private:
     const T* origin;
 };
 REGISTER_SET_WITH_PROGRAMSTATE(PendingNonLocValueSet, TrackedValueType<clang::Expr>);
+REGISTER_SET_WITH_PROGRAMSTATE(PendingMemoryRegionSet, TrackedValueType<clang::ento::MemRegion>);
+
+// For sanity
+template <class T>
+using PointerToMemberFunctionReturningSourceRange = clang::SourceRange(T::*)() const;
+
+// This template provides a mechanism through which TrackedValueType<T> can determine the appropriate member function to call
+template <class T> constexpr PointerToMemberFunctionReturningSourceRange<T> LookupSourceRangeFunction(); 
+template <> constexpr PointerToMemberFunctionReturningSourceRange<clang::Expr> LookupSourceRangeFunction<clang::Expr>()
+{
+    return &clang::Expr::getSourceRange;
+}
+template <> constexpr PointerToMemberFunctionReturningSourceRange<clang::ento::MemRegion> LookupSourceRangeFunction<clang::ento::MemRegion>()
+{
+    return &clang::ento::MemRegion::sourceRange;
+}
 
 wildcop::DiscardedReturnValueChecker::DiscardedReturnValueChecker()
     :tag(this, "wildcop-mcpp-0-1-7")
@@ -117,7 +134,7 @@ void wildcop::DiscardedReturnValueChecker::checkLocation(
     if (isLoad) // we only care about loaded values from tracked SVals
     {
         // mark the symbol being loaded
-        markValueUsed(location, llvm::dyn_cast<const clang::Expr>(statement), C, statement->getSourceRange());
+        markValueUsed(location, llvm::dyn_cast<const clang::Expr>(statement), C, llvm::dyn_cast<const clang::Expr>(statement));
     }
 }
 
@@ -140,8 +157,28 @@ void wildcop::DiscardedReturnValueChecker::checkBind(
     else
     {
         // Mark the symbol being loaded. Forward if necessary.
-        markValueUsed(value, expr, C, statement->getSourceRange(), location.getAsSymbol());
+        markValueUsed(value, expr, C, expr, location);
     }
+}
+
+template <class T>
+ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::checkSetIsEmpty(ento::ProgramStateRef state, ento::CheckerContext &C) const
+{
+    const auto& set = state->get<T>();
+    // Exiting the top frame. All pending locs are bugs.
+    if (set.isEmpty() == false)
+    {
+        // Emit bugs for all pending items
+        for (auto value : set)
+        {
+            emitBug(C, value.GetSourceRange());
+
+            // Clear it from the set so we don't keep tracking this/emit duplicates
+            state = state->remove<T>(value);
+        }
+    }
+
+    return state;
 }
 
 void wildcop::DiscardedReturnValueChecker::checkEndFunction(clang::ento::CheckerContext &C) const
@@ -150,19 +187,20 @@ void wildcop::DiscardedReturnValueChecker::checkEndFunction(clang::ento::Checker
     // it's a little tricky to attempt to identify which frame a temporary is escaping from.
     if (C.inTopFrame())
     {
-        // Exiting the top frame. All pending locs are bugs.
-        const auto& set = C.getState()->get<PendingNonLocValueSet>();
-        if (set.isEmpty() == false)
-        {
-            // Emit bugs for all pending non-locs
-            for (auto nonLoc : set)
-            {
-                emitBug(C, nonLoc.GetOrigin()->getSourceRange());
+        // Get the current state
+        ento::ProgramStateRef state = C.getState();
+        const ento::ProgramStateRef originalState = state;
 
-                // Clear it from the set so we don't keep tracking this/emit duplicates
-                auto newState = C.getState()->remove<PendingNonLocValueSet>(nonLoc);
-            }
+        // Run the checks; emit bugs if necessary
+        checkSetIsEmpty<PendingNonLocValueSet>(state, C);
+        checkSetIsEmpty<PendingMemoryRegionSet>(state, C);
+
+        // If the state was altered, record it
+        if (state != originalState)
+        {
+            C.addTransition(state);
         }
+
     }
 }
 
@@ -270,8 +308,8 @@ void wildcop::DiscardedReturnValueChecker::markValueUsed(
     ento::SVal value, 
     const clang::Expr* usedExpression,
     ento::CheckerContext &C, 
-    clang::SourceRange sourceRange,
-    ento::SymbolRef forwardedSymbol) const
+    const clang::Expr* forwardingExpression,
+    llvm::Optional<ento::SVal> forwardedValue) const
 {
     auto oldState = C.getState();
     // See if this is a symbol
@@ -279,23 +317,44 @@ void wildcop::DiscardedReturnValueChecker::markValueUsed(
 
     if (symbol != nullptr)
     {
-        return markSymbolUsed(symbol, C, sourceRange, forwardedSymbol);
+        return markSymbolUsed(symbol, C, forwardingExpression, forwardedValue);
     }
     else
     {
-        auto newState = removeUsedExpressionsFromState(oldState, usedExpression);
+        // remove used expressions
+        auto newState = removeUsedExpressionsFromState(oldState, usedExpression, forwardedValue);
+
+        // if we're tracking the memory location associated with this value, mark it used as well, then forward
+        const clang::ento::MemRegion* region = value.getAsRegion();
+        if (region != nullptr)
+        {
+            TrackedValueType<ento::MemRegion> pendingMemoryRegion(region);
+            if (newState->contains<PendingMemoryRegionSet>(pendingMemoryRegion))
+            {
+                newState = newState->remove<PendingMemoryRegionSet>(pendingMemoryRegion);
+
+                // If we have a forwarding expression, start tracking that
+                if (forwardedValue.hasValue() && forwardedValue->getAsRegion() != nullptr)
+                {
+                    newState = newState->add<PendingMemoryRegionSet>(TrackedValueType<ento::MemRegion>(forwardedValue->getAsRegion()));
+                }
+            }
+        }
+
         C.addTransition(newState);
     }
 }
 
-clang::ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::removeUsedExpressionsFromState(clang::ento::ProgramStateRef state, const clang::Expr* expression) const
+clang::ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::removeUsedExpressionsFromState(
+    clang::ento::ProgramStateRef state, 
+    const clang::Expr* expression,
+    llvm::Optional<ento::SVal> forwardedValue) const
 {
     // This is not a symbol. If we're tracking it as a non-loc, remove it.
     TrackedValueType<clang::Expr> nonLoc(expression);
     if (state->contains<PendingNonLocValueSet>(nonLoc))
     {
-        auto newState = state->remove<PendingNonLocValueSet>(nonLoc);
-        return newState;
+        state = state->remove<PendingNonLocValueSet>(nonLoc);
     }
     else
     {
@@ -307,41 +366,53 @@ clang::ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::removeUsedExp
         if (binop && binop->getOpcode() == clang::BO_Comma)
         {
             // This is a comma operator. Only consume the right-hand side.
-            return removeUsedExpressionsFromState(state, binop->getRHS());
+            state = removeUsedExpressionsFromState(state, binop->getRHS(), forwardedValue);
         }
         else
         {
             // Not a comma operator, so handle it as per normal.
-            auto currentState = state;
             for (auto iterator = expression->child_begin(); iterator != expression->child_end(); ++iterator)
             {
                 const clang::Expr* childExpression = dyn_cast<const clang::Expr>(*iterator);
                 if (childExpression)
                 {
-                    currentState = removeUsedExpressionsFromState(currentState, childExpression);
+                    state = removeUsedExpressionsFromState(state, childExpression, forwardedValue);
                 }
             }
-
-            // Now that we've done all of the altering of the state in this branch, return the new state reference
-            return currentState;
         }
-
     }
+
+    // forward to the specified value if it exists
+    if (forwardedValue.hasValue())
+    {
+        const ento::MemRegion* region = forwardedValue->getAsRegion();
+        if (region != nullptr)
+        {
+            state = state->add<PendingMemoryRegionSet>(TrackedValueType<ento::MemRegion>(forwardedValue->getAsRegion()));
+        }
+    }
+
+    return state;
 }
 
 void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
     ento::SymbolRef symbol,
     ento::CheckerContext &C,
-    clang::SourceRange sourceRange,
-    ento::SymbolRef forwardedSymbol) const
+    const clang::Expr* forwardingExpression,
+    llvm::Optional<ento::SVal> forwardedValue) const
 {
-    auto oldState = C.getState();
+    auto state = C.getState();
+    const auto originalState = state;
 
     // Check if we're tracking this symbol
-    if (oldState->contains<ReturnValueMap>(symbol))
+    if (state->contains<ReturnValueMap>(symbol))
     {
-        auto newState = oldState->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
-        C.addTransition(newState, &tag);
+        // We are, so mark it as used, and forward if necessary
+        state = state->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
+        if (forwardedValue.hasValue())
+        {
+            state = forwardValueUsage(*forwardedValue, forwardingExpression, state);
+        }
     }
 
     // Check dependent symbols
@@ -352,11 +423,41 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
         if (symbol != *dependencyIterator)
         {
             markSymbolUsed(*dependencyIterator, C);
-            if (forwardedSymbol != nullptr)
+            if (forwardedValue.hasValue())
             {
-                auto nextState = oldState->set<ReturnValueMap>(forwardedSymbol, ReturnValueState::GetUnused(sourceRange));
-                C.addTransition(nextState, &tag);
+                state = forwardValueUsage(*forwardedValue, forwardingExpression, state);
             }
+        }
+    }
+
+    // If we altered the state, add a transition
+    if (state != originalState)
+    {
+        C.addTransition(state, &tag);
+    }
+}
+
+ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::forwardValueUsage(clang::ento::SVal forwardingValue, const Expr* valueExpression, clang::ento::ProgramStateRef state) const
+{
+    // There are two types of values we can forward: symbols and memory regions
+    ento::SymbolRef symbol = forwardingValue.getAsSymbol();
+    if (symbol != nullptr)
+    {
+        // This is a symbol - add it to the map as unused
+        return state->set<ReturnValueMap>(symbol, ReturnValueState::GetUnused(valueExpression->getSourceRange()));
+    }
+    else
+    {
+        const ento::MemRegion* memRegion = forwardingValue.getAsRegion();
+        if (memRegion)
+        {
+            // This is a memory region. Start tracking it.
+            return state->add<PendingMemoryRegionSet>(TrackedValueType<ento::MemRegion>(memRegion));
+        }
+        else
+        {
+            // No way to forward this usage. Return the original state.
+            return state;
         }
     }
 }

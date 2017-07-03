@@ -92,10 +92,20 @@ namespace wildcop
          * specified expression. A transition is not automatically added to the checker context; this is because
          * all removals must happen in the same transition. (We do not want to create a branch.)
          * @param state the state to alter
-         * @expression the expression against which to check for expressions pending usage
+         * @param expression the expression against which to check for expressions pending usage
+         * @param forwardedValue the new value at which this expression is now being stored (which should now be tracked),
+         * or nothing if it should be consumed without tracking
          * @returns the newly altered state
          */
-        clang::ento::ProgramStateRef removeUsedExpressionsFromState(clang::ento::ProgramStateRef state, const clang::Expr* expression) const;
+        clang::ento::ProgramStateRef removeUsedExpressionsFromState(
+            clang::ento::ProgramStateRef state, 
+            const clang::Expr* expression, 
+            llvm::Optional<clang::ento::SVal> forwardedValue = llvm::Optional<clang::ento::SVal>()) const;
+
+        clang::ento::ProgramStateRef forwardValueUsage(clang::ento::SVal forwardingValue, const clang::Expr* valueExpression, clang::ento::ProgramStateRef state) const;
+
+        template <class T>
+        clang::ento::ProgramStateRef checkSetIsEmpty(clang::ento::ProgramStateRef state, clang::ento::CheckerContext& C) const;
 
 
         /**
@@ -119,33 +129,33 @@ namespace wildcop
          * @param value the value to mark as used (which may or may not be a symbol)
          * @param usedExpression the expression in which the specified value was used
          * @param C the checker context to which the state transition should be applied
-         * @param sourceRange the source range with which to mark up a bug if one is detected; an invalid range is used if
-         * not specified
-         * @param forwardedSymbol the new, currently unused symbol that is now tracking the data that was previously
-         * tracked by \see symbol, or nullptr if there is no symbol to which this is being forwarded
+         * @param forwardingExpression the expression at which to record the \see forwardedSymbol in the event of a bug
+         * being produced
+         * @param forwardedSymbol the new, currently unused value that is now tracking the data that was previously
+         * tracked by \see value, or nullptr if there is no symbol to which this is being forwarded
          */
         void markValueUsed(
             clang::ento::SVal value, 
             const clang::Expr* usedExpression,
             clang::ento::CheckerContext &C, 
-            clang::SourceRange sourceRange = clang::SourceRange(),
-            clang::ento::SymbolRef forwardedSymbol = nullptr) const;
+            const clang::Expr* forwardingExpression = nullptr,
+            llvm::Optional<clang::ento::SVal> forwardedValue = llvm::Optional<clang::ento::SVal>()) const;
 
         /**
          * Marks the specified symbol as used. If the symbol depends on other symbols (such as would occur
          * in an expression), all dependent symbols are marked used.
          * @param symbol the symbol to mark as used
          * @param C the checker context to which the state transition should be applied
-         * @param sourceRange the source range with which to mark up a bug if one is detected; an invalid range is used if
-         * not specified
-         * @param forwardedSymbol the new, currently unused symbol that is now tracking the data that was previously
-         * tracked by \see symbol, or nullptr if there is no symbol to which this is being forwarded
+         * @param forwardingExpression the expression at which to record the \see forwardedSymbol in the event of a bug
+         * being produced
+         * @param forwardedSymbol the new, currently unused value that is now tracking the data that was previously
+         * tracked by \see symbol, or nullptr if there is no value to which this is being forwarded
          */
         void markSymbolUsed(
             clang::ento::SymbolRef symbol, 
             clang::ento::CheckerContext &C, 
-            clang::SourceRange sourceRange = clang::SourceRange(),
-            clang::ento::SymbolRef forwardedSymbol = nullptr) const;
+            const clang::Expr* forwardingExpression = nullptr,
+            llvm::Optional<clang::ento::SVal> forwardedValue = llvm::Optional<clang::ento::SVal>()) const;
 
         /**
          * The tag used when emitting a report
