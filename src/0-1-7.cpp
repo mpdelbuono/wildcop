@@ -12,6 +12,7 @@ using namespace clang;
 // Self register
 const int wildcop::DiscardedReturnValueChecker::dummy = AutoInitializeChecker<DiscardedReturnValueChecker>();
 
+
 void wildcop::DiscardedReturnValueChecker::Initialize(ento::CheckerRegistry& registry)
 {
     registry.addChecker<DiscardedReturnValueChecker>("wildcop.0-1-7", "MISRA C++ 0-1-7: Discarded Return Value");
@@ -44,10 +45,39 @@ private:
     ReturnValueState(State s, SourceRange& range) : state(s), lastSourceRange(range) {}
     SourceRange lastSourceRange;
 };
-
 REGISTER_MAP_WITH_PROGRAMSTATE(ReturnValueMap, clang::ento::SymbolRef, ReturnValueState);
 
+// For non-loc values (such as integer constants not bound to a variable), we must track that the return value
+// is immediately bound to some variable or consumed (both are acceptable - as long as it is used in some way).
+// We use this program trait to store that data: the most recently received set of non-loc symbols, all of which
+// must be consumed prior to the next statement. Evaluation of a subsequent statement without first clearing this
+// list is a bug report.
+struct PendingNonLocValue
+{
+public:
+    PendingNonLocValue(const clang::Expr* originExpr) : expr(originExpr) {};
+    bool operator ==(PendingNonLocValue const &rhs) const { return expr == rhs.expr; }
+    bool operator <(PendingNonLocValue const& rhs) const {
+        llvm::FoldingSetNodeID lhsProfile, rhsProfile;
+        Profile(lhsProfile);
+        rhs.Profile(rhsProfile);
+        return lhsProfile < rhsProfile;
+    }
+
+    void Profile(llvm::FoldingSetNodeID &ID) const
+    {
+        ID.AddPointer(expr);
+    }
+
+    const clang::Expr* GetOriginExpr() const { return expr; }
+private:
+    const clang::Expr* expr;
+};
+REGISTER_SET_WITH_PROGRAMSTATE(PendingNonLocValueSet, PendingNonLocValue);
+
+
 wildcop::DiscardedReturnValueChecker::DiscardedReturnValueChecker()
+    :tag(this, "wildcop-mcpp-0-1-7")
 {
     bugType.reset(new ento::BugType(this, "0-1-7 Non-compliance: Return Value Discarded", "MISRA C++"));
 }
@@ -58,15 +88,11 @@ void wildcop::DiscardedReturnValueChecker::checkPreCall(const clang::ento::CallE
     // Analysis of the call's output will be handled by checkPostCall().
     for (unsigned int i = 0; i < call.getNumArgs(); ++i)
     {
-        ento::SymbolRef argSymbol = call.getArgSVal(i).getAsSymbol();
-        if (argSymbol == nullptr)
-        {
-            return;
-        }
-
-        markSymbolUsed(argSymbol, C);
+        ento::SVal arg = call.getArgSVal(i);
+        markValueUsed(arg, call.getArgExpr(i), C);
     }
 }
+
 
 void wildcop::DiscardedReturnValueChecker::checkPostCall(const clang::ento::CallEvent &call, clang::ento::CheckerContext &C) const
 {
@@ -78,16 +104,8 @@ void wildcop::DiscardedReturnValueChecker::checkPostCall(const clang::ento::Call
     }
 
     // Otherwise, let's start tracking the usage of this value
-    clang::ento::SymbolRef returnValue = call.getReturnValue().getAsSymbol();
-    if (returnValue == nullptr)
-    {
-        return; // unable to process return value from this function
-    }
-
-    // Record the newly discovered return value
-    ento::ProgramStateRef currentState = C.getState();
-    currentState = currentState->set<ReturnValueMap>(returnValue, ReturnValueState::GetUnused(call.getSourceRange()));
-    C.addTransition(currentState);
+    ento::SVal returnValue = call.getReturnValue();
+    markSymbolUnused(returnValue, C, call.getOriginExpr());
 }
 
 void wildcop::DiscardedReturnValueChecker::checkLocation(
@@ -98,15 +116,8 @@ void wildcop::DiscardedReturnValueChecker::checkLocation(
 {
     if (isLoad) // we only care about loaded values from tracked SVals
     {
-        // Get the symbol being tracked
-        ento::SymbolRef symbol = location.getAsSymbol();
-        if (symbol == nullptr)
-        {
-            return;
-        }
-
-        // Are we tracking this symbol?
-        markSymbolUsed(symbol, C, statement->getSourceRange());
+        // mark the symbol being loaded
+        markValueUsed(location, llvm::dyn_cast<const clang::Expr>(statement), C, statement->getSourceRange());
     }
 }
 
@@ -116,15 +127,30 @@ void wildcop::DiscardedReturnValueChecker::checkBind(
     const clang::Stmt *statement,
     clang::ento::CheckerContext &C) const
 {
-    // Get the symbol being loaded
-    ento::SymbolRef symbol = value.getAsSymbol();
-    if (symbol == nullptr)
-    {
-        return;
-    }
+    // Mark the symbol being loaded. Forward if necessary.
+    markValueUsed(value, llvm::dyn_cast<const clang::Expr>(statement), C, statement->getSourceRange(), location.getAsSymbol());
+}
 
-    // Mark the symbol loaded. Forward if necessary.
-    markSymbolUsed(symbol, C, statement->getSourceRange(), location.getAsSymbol());
+void wildcop::DiscardedReturnValueChecker::checkEndFunction(clang::ento::CheckerContext &C) const
+{
+    // For now we're only going to check this at the top level exit. This isn't entirely correct, but
+    // it's a little tricky to attempt to identify which frame a temporary is escaping from.
+    if (C.inTopFrame())
+    {
+        // Exiting the top frame. All pending locs are bugs.
+        const auto& set = C.getState()->get<PendingNonLocValueSet>();
+        if (set.isEmpty() == false)
+        {
+            // Emit bugs for all pending non-locs
+            for (auto nonLoc : set)
+            {
+                emitBug(C, nonLoc.GetOriginExpr()->getSourceRange());
+
+                // Clear it from the set so we don't keep tracking this/emit duplicates
+                auto newState = C.getState()->remove<PendingNonLocValueSet>(nonLoc);
+            }
+        }
+    }
 }
 
 void wildcop::DiscardedReturnValueChecker::checkDeadSymbols(clang::ento::SymbolReaper &SR, clang::ento::CheckerContext &C) const
@@ -140,10 +166,10 @@ void wildcop::DiscardedReturnValueChecker::checkDeadSymbols(clang::ento::SymbolR
         if (SR.isDead(symbol))
         {
             // check state - at this point the symbol had better be used
-            if (state->get<ReturnValueMap>(symbol)->IsUnused())
+            if (trackedSymbol.second.IsUnused())
             {
                 // This value was never used. Report a bug.
-                emitBug(C, symbol);
+                emitBug(C, trackedSymbol.second.GetSourceRange());
             }
 
             // always clean up the symbol from the map
@@ -152,33 +178,157 @@ void wildcop::DiscardedReturnValueChecker::checkDeadSymbols(clang::ento::SymbolR
     }
 }
 
-void wildcop::DiscardedReturnValueChecker::emitBug(clang::ento::CheckerContext &C, clang::ento::SymbolRef symbol) const
+bool wildcop::DiscardedReturnValueChecker::statementContainsExpr(const clang::Stmt* statement, const clang::Expr* expression)
 {
-    ento::ExplodedNode *error = C.generateNonFatalErrorNode();
-    if (error == nullptr)
+    // Base case - if the statement IS the expression, then return true.
+    if (statement == expression)
     {
-        // This has already been reached on another path - ignore it
-        return;
+        return true;
+    }
+    else
+    {
+        // Scan all children
+        for (auto iterator = statement->child_begin(); iterator != statement->child_end(); ++iterator)
+        {
+            if (statementContainsExpr(*iterator, expression))
+            {
+                return true;
+            }
+        }
+
+        // Failed to find the expression
+        return false;
+    }
+}
+
+void wildcop::DiscardedReturnValueChecker::emitBug(clang::ento::CheckerContext &C, clang::SourceRange sourceRange/*, const clang::Decl* declWithIssue*/) const
+{
+    std::unique_ptr<ento::BugReport> report;
+
+    // Try to use the specified source range if possible
+    if (sourceRange.isValid())
+    {
+        report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", 
+            ento::PathDiagnosticLocation(sourceRange.getBegin(), C.getSourceManager()));
+        report->addRange(sourceRange);
+    }
+    else
+    {
+        // Otherwise, defer to the checker's current state
+        ento::ExplodedNode *error = C.generateNonFatalErrorNode(C.getState(), &tag);
+        if (error == nullptr)
+        {
+            // This has already been reached on another path - ignore it
+            return;
+        }
+
+        report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", error);
     }
 
-    auto report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", error);
-    report->addRange(C.getState()->get<ReturnValueMap>(symbol)->GetSourceRange());
-    report->markInteresting(symbol);
+    // now that the report has been generated, emit it
     C.emitReport(std::move(report));
 }
 
-void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
-    ento::SymbolRef symbol, 
+void wildcop::DiscardedReturnValueChecker::markSymbolUnused(
+    ento::SVal value,
+    ento::CheckerContext &C,
+    const clang::Expr* originExpr) const
+{
+    // Attempt to track it as a symbol
+    clang::ento::SymbolRef symbol = value.getAsSymbol();
+    if (symbol == nullptr)
+    {
+        // This is not symbolic; probably because it's a non-loc. 
+        // Record the expression as unused
+        auto oldState = C.getState();
+        auto newState = oldState->add<PendingNonLocValueSet>(PendingNonLocValue(originExpr));
+        C.addTransition(newState, &tag);
+    }
+    else
+    {
+        // This is a symbol. Record it as unused.
+        auto oldState = C.getState();
+        auto newState = oldState->set<ReturnValueMap>(symbol, ReturnValueState::GetUnused(originExpr->getSourceRange()));
+        C.addTransition(newState, &tag);
+    }
+}
+
+void wildcop::DiscardedReturnValueChecker::markValueUsed(
+    ento::SVal value, 
+    const clang::Expr* usedExpression,
     ento::CheckerContext &C, 
     clang::SourceRange sourceRange,
     ento::SymbolRef forwardedSymbol) const
 {
-    // Check if we're tracking this symbol
-    if (C.getState()->contains<ReturnValueMap>(symbol))
+    auto oldState = C.getState();
+    // See if this is a symbol
+    ento::SymbolRef symbol = value.getAsSymbol();
+
+    if (symbol != nullptr)
     {
-        // This symbol has now been used
-        auto newState = C.getState()->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
+        return markSymbolUsed(symbol, C, sourceRange, forwardedSymbol);
+    }
+    else
+    {
+        auto newState = removeUsedExpressionsFromState(oldState, usedExpression);
         C.addTransition(newState);
+    }
+}
+
+clang::ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::removeUsedExpressionsFromState(clang::ento::ProgramStateRef state, const clang::Expr* expression) const
+{
+    // This is not a symbol. If we're tracking it as a non-loc, remove it.
+    PendingNonLocValue nonLoc(expression);
+    if (state->contains<PendingNonLocValueSet>(nonLoc))
+    {
+        auto newState = state->remove<PendingNonLocValueSet>(nonLoc);
+        return newState;
+    }
+    else
+    {
+        // Try to consume any subexpressions if possible
+
+        // The comma operator is special. While expressions might be inside it, only the right argument actually ends up used. So do NOT
+        // consume the left argument as if it were used.
+        const clang::BinaryOperator* binop = llvm::dyn_cast<const clang::BinaryOperator>(expression);
+        if (binop && binop->getOpcode() == clang::BO_Comma)
+        {
+            // This is a comma operator. Only consume the right-hand side.
+            return removeUsedExpressionsFromState(state, binop->getRHS());
+        }
+        else
+        {
+            // Not a comma operator, so handle it as per normal.
+            auto currentState = state;
+            for (auto iterator = expression->child_begin(); iterator != expression->child_end(); ++iterator)
+            {
+                const clang::Expr* childExpression = dyn_cast<const clang::Expr>(*iterator);
+                if (childExpression)
+                {
+                    currentState = removeUsedExpressionsFromState(currentState, childExpression);
+                }
+            }
+
+            // Now that we've done all of the altering of the state in this branch, return the new state reference
+            return currentState;
+        }
+
+    }
+}
+
+void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
+    ento::SymbolRef symbol,
+    ento::CheckerContext &C,
+    clang::SourceRange sourceRange,
+    ento::SymbolRef forwardedSymbol) const
+{
+    auto oldState = C.getState();
+
+    // Check if we're tracking this symbol
+    if (oldState->contains<ReturnValueMap>(symbol))
+    {
+        auto newState = oldState->set<ReturnValueMap>(symbol, ReturnValueState::GetUsed());
+        C.addTransition(newState, &tag);
     }
 
     // Check dependent symbols
@@ -191,8 +341,8 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
             markSymbolUsed(*dependencyIterator, C);
             if (forwardedSymbol != nullptr)
             {
-                auto nextState = C.getState()->set<ReturnValueMap>(forwardedSymbol, ReturnValueState::GetUnused(sourceRange));
-                C.addTransition(nextState);
+                auto nextState = oldState->set<ReturnValueMap>(forwardedSymbol, ReturnValueState::GetUnused(sourceRange));
+                C.addTransition(nextState, &tag);
             }
         }
     }
