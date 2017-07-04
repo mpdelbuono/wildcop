@@ -95,12 +95,17 @@ namespace wildcop
          * @param expression the expression against which to check for expressions pending usage
          * @param forwardedValue the new value at which this expression is now being stored (which should now be tracked),
          * or nothing if it should be consumed without tracking
+         * @param C the checker context to emit a bug to if forwarding fails
+         * @param bugReportExpression the expression to use in any emitted bug reports. Normally this should not be specified;
+         * nullptr indicates the root expression should be used. This parameter is used internally.
          * @returns the newly altered state
          */
         clang::ento::ProgramStateRef removeUsedExpressionsFromState(
             clang::ento::ProgramStateRef state, 
             const clang::Expr* expression, 
-            llvm::Optional<clang::ento::SVal> forwardedValue = llvm::Optional<clang::ento::SVal>()) const;
+            llvm::Optional<clang::ento::SVal> forwardedValue,
+            clang::ento::CheckerContext &C,
+            const clang::Expr* bugReportExpression = nullptr) const;
 
         /**
          * Forwards the usage of a value into another value. This is used for expressions such as assignments where merely

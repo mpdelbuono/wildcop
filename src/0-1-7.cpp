@@ -299,6 +299,19 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUnused(
     {
         // This is a symbol. Record it as unused.
         auto oldState = C.getState();
+        if (oldState->contains<ReturnValueMap>(symbol) && oldState->get<ReturnValueMap>(symbol)->IsUnused())
+        {
+            // This is a duplicate symbol. In general this occurs as a result of reassignment overwriting a symbol
+            // before it ends up being used. Report this as a bug.
+            auto oldSourceRange = oldState->get<ReturnValueMap>(symbol)->GetSourceRange();
+            ento::ExplodedNode* errorNode = C.generateNonFatalErrorNode(oldState, &tag);
+            auto report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", errorNode);
+            report->addRange(originExpr->getSourceRange());
+            report->addNote("return value originated here", ento::PathDiagnosticLocation(oldSourceRange.getBegin(), C.getSourceManager()));
+            C.emitReport(std::move(report));
+        }
+
+        // Regardless of the state, add the transition
         auto newState = oldState->set<ReturnValueMap>(symbol, ReturnValueState::GetUnused(originExpr->getSourceRange()));
         C.addTransition(newState, &tag);
     }
@@ -322,7 +335,7 @@ void wildcop::DiscardedReturnValueChecker::markValueUsed(
     else
     {
         // remove used expressions
-        auto newState = removeUsedExpressionsFromState(oldState, usedExpression, forwardedValue);
+        auto newState = removeUsedExpressionsFromState(oldState, usedExpression, forwardedValue, C);
 
         // if we're tracking the memory location associated with this value, mark it used as well, then forward
         const clang::ento::MemRegion* region = value.getAsRegion();
@@ -348,25 +361,42 @@ void wildcop::DiscardedReturnValueChecker::markValueUsed(
 clang::ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::removeUsedExpressionsFromState(
     clang::ento::ProgramStateRef state, 
     const clang::Expr* expression,
-    llvm::Optional<ento::SVal> forwardedValue) const
+    llvm::Optional<ento::SVal> forwardedValue,
+    ento::CheckerContext &C,
+    const clang::Expr* bugReportExpression) const
 {
+    if (bugReportExpression == nullptr)
+    {
+        bugReportExpression = expression;
+    }
+
     // This is not a symbol. If we're tracking it as a non-loc, remove it.
     TrackedValueType<clang::Expr> nonLoc(expression);
     if (state->contains<PendingNonLocValueSet>(nonLoc))
     {
         state = state->remove<PendingNonLocValueSet>(nonLoc);
+
+        // forward to the specified value if it exists
+        if (forwardedValue.hasValue())
+        {
+            state = forwardValueUsage(*forwardedValue, bugReportExpression, state, C);
+        }
     }
     else
     {
         // Try to consume any subexpressions if possible
 
-        // The comma operator is special. While expressions might be inside it, only the right argument actually ends up used. So do NOT
-        // consume the left argument as if it were used.
+        // Some operators only consume one side. For those operators, make sure we only consume the right piece. (In all cases
+        // it's the RHS.)
         const clang::BinaryOperator* binop = llvm::dyn_cast<const clang::BinaryOperator>(expression);
-        if (binop && binop->getOpcode() == clang::BO_Comma)
+        if (
+            binop && ( binop->getOpcode() == clang::BO_Comma ||
+                       binop->isAssignmentOp()) // includes +=, &=, etc.
+            
+            )
         {
-            // This is a comma operator. Only consume the right-hand side.
-            state = removeUsedExpressionsFromState(state, binop->getRHS(), forwardedValue);
+            // This is a operator where we only watch the RHS. Only consume the right-hand side.
+            state = removeUsedExpressionsFromState(state, binop->getRHS(), forwardedValue, C, bugReportExpression);
         }
         else
         {
@@ -376,19 +406,9 @@ clang::ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::removeUsedExp
                 const clang::Expr* childExpression = dyn_cast<const clang::Expr>(*iterator);
                 if (childExpression)
                 {
-                    state = removeUsedExpressionsFromState(state, childExpression, forwardedValue);
+                    state = removeUsedExpressionsFromState(state, childExpression, forwardedValue, C, bugReportExpression);
                 }
             }
-        }
-    }
-
-    // forward to the specified value if it exists
-    if (forwardedValue.hasValue())
-    {
-        const ento::MemRegion* region = forwardedValue->getAsRegion();
-        if (region != nullptr)
-        {
-            state = state->add<PendingMemoryRegionSet>(TrackedValueType<ento::MemRegion>(forwardedValue->getAsRegion()));
         }
     }
 
@@ -401,6 +421,7 @@ void wildcop::DiscardedReturnValueChecker::markSymbolUsed(
     const clang::Expr* forwardingExpression,
     llvm::Optional<ento::SVal> forwardedValue) const
 {
+
     auto state = C.getState();
     const auto originalState = state;
 
@@ -448,6 +469,20 @@ ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::forwardValueUsage(
     if (symbol != nullptr)
     {
         // This is a symbol - add it to the map as unused
+        // If this is already in the map as unused, then we have a problem: we're writing over the symbol! Emit a bug.
+        if (state->contains<ReturnValueMap>(symbol) && state->get<ReturnValueMap>(symbol)->IsUnused())
+        {
+            // This is a duplicate symbol. In general this occurs as a result of reassignment overwriting a symbol
+            // before it ends up being used. Report this as a bug.
+            auto oldSourceRange = state->get<ReturnValueMap>(symbol)->GetSourceRange();
+            ento::ExplodedNode* errorNode = C.generateNonFatalErrorNode(state, &tag);
+            auto report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", errorNode);
+            report->addRange(valueExpression->getSourceRange());
+            report->addNote("return value originated here", ento::PathDiagnosticLocation(oldSourceRange.getBegin(), C.getSourceManager()));
+            C.emitReport(std::move(report));
+        }
+
+        // Regardless, record the new symbol so we can continue the analysis
         return state->set<ReturnValueMap>(symbol, ReturnValueState::GetUnused(valueExpression->getSourceRange()));
     }
     else
@@ -467,9 +502,12 @@ ento::ProgramStateRef wildcop::DiscardedReturnValueChecker::forwardValueUsage(
                     {
                         // Emit a bug for this.
                         ento::ExplodedNode* errorNode = C.generateNonFatalErrorNode(state, &tag);
-                        auto report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", errorNode);
-                        report->addRange(valueExpression->getSourceRange());
-                        report->addNote("return value originated here", ento::PathDiagnosticLocation(oldRegion.GetSourceRange().getBegin(), C.getSourceManager()));
+                        auto report = llvm::make_unique<ento::BugReport>(*bugType, "MISRA C++ 0-1-7 non-compliance: Discarding return value", 
+                            ento::PathDiagnosticLocation(valueExpression, C.getSourceManager(), C.getLocationContext()));
+                        if (oldRegion.GetSourceRange().isValid())
+                        {
+                           report->addNote("return value originated here", ento::PathDiagnosticLocation(oldRegion.GetSourceRange().getBegin(), C.getSourceManager()));
+                        }
                         C.emitReport(std::move(report));
                         break;
                     }

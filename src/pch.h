@@ -24,4 +24,5 @@
 #include "clang/StaticAnalyzer/Core/CheckerRegistry.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
+#include "clang/StaticAnalyzer/Core/BugReporter/PathDiagnostic.h"
 WILDCOP_WARNING_POP()
